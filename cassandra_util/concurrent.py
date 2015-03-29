@@ -23,8 +23,11 @@
     large numbers.
 '''
 
-
-from Queue import Queue
+try:
+    from Queue import Queue
+except ImportError:
+    from queue import Queue
+    
 from heapq import heappush, heappop
 from threading import Semaphore, Thread
 
