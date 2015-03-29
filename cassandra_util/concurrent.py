@@ -27,9 +27,37 @@ try:
     from Queue import Queue
 except ImportError:
     from queue import Queue
+
+try:
+    from threading import _Semaphore as Semaphore
+except ImportError:
+    from threading import Semaphore
     
 from heapq import heappush, heappop
-from threading import Semaphore, Thread
+from threading import Thread
+
+
+class _JoinableSemaphore(Semaphore):
+    '''
+        Utility wrapper around threading.Sempaphore which allows 'joining',
+        i.e. waiting for the semaphore to reach a certain value again.
+    '''
+    def join(self, value):
+        ''' Blocks until the semaphore value is back at the given value '''
+        if hasattr(self, '_cond'):
+            self._join_py3(value)
+        else:
+            self._join_py2(value)
+    
+    def _join_py2(self, value):
+        with self._Semaphore__cond:
+            while self._Semaphore__value < value:
+                self._Semaphore__cond.wait()
+
+    def _join_py3(self, value):
+        with self._cond:
+            while self._value < value:
+                self._cond.wait()
 
 
 class _ConcurrentExecutor:
@@ -49,7 +77,7 @@ class _ConcurrentExecutor:
 
         # the semaphore to ensure that no more than `concurrency` statements
         # are executed in parallel
-        self.semaphore = Semaphore(concurrency)
+        self.semaphore = _JoinableSemaphore(concurrency)
 
         # holder for any exception raised in executing the statements if
         # `raise_on_first_error` is set, execute_concurrent will raise the
@@ -72,13 +100,17 @@ class _ConcurrentExecutor:
         Thread(target=self._execute_statements, name='executor').start()
 
         if self.silent:
-            # yield nothing if in silent mode
-            raise StopIteration
+            # if in silent mode wait for final insert to be submitted
+            while not self.last:
+                self.semaphore.join(self.concurrency)
+            # then wait for it to complete
+            self.semaphore.join(self.concurrency)
         if not self.silent:
             # else, start ordering the results to return to the client
             Thread(target=self._order_results, name='orderer').start()
+            return self._results_generator()
 
-
+    def _results_generator(self):
         # yield ordered results until the sentinel value (idx == None) is found
         while True:
             if self.exception:
@@ -120,7 +152,9 @@ class _ConcurrentExecutor:
         if not succes:
             self.failure = result
 
-        self.results_unordered.put((idx, succes, result))
+        if not self.silent:
+            self.results_unordered.put((idx, succes, result))
+            
         self.semaphore.release()
 
     def _succes(self, result, idx):
